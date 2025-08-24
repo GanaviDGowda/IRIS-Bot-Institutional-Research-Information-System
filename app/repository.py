@@ -14,6 +14,13 @@ from .config import DB_BACKEND
 def _row_to_paper(row) -> Paper:
 	# row can be sqlite3.Row or dict from psycopg2.extras
 	get = row.__getitem__ if isinstance(row, sqlite3.Row) else (lambda k: row[k])
+	
+	# Handle missing full_text column gracefully
+	try:
+		full_text = get("full_text") or ""
+	except (KeyError, IndexError):
+		full_text = ""  # Default to empty string if column doesn't exist
+	
 	return Paper(
 		id=get("id"),
 		title=get("title"),
@@ -27,6 +34,7 @@ def _row_to_paper(row) -> Paper:
 		student=get("student") or "",
 		review_status=get("review_status") or "",
 		file_path=get("file_path"),
+		full_text=full_text,
 	)
 
 
@@ -50,14 +58,15 @@ class PaperRepository:
 			paper.student,
 			paper.review_status,
 			paper.file_path,
+			paper.full_text,
 		)
 		if DB_BACKEND == "sqlite":
 			with self.conn:
 				cur = self.conn.execute(
 					f"""
 					INSERT INTO papers
-					(title, authors, year, abstract, department, paper_type, research_domain, publisher, student, review_status, file_path)
-					VALUES ({self._placeholders(11)})
+					(title, authors, year, abstract, department, paper_type, research_domain, publisher, student, review_status, file_path, full_text)
+					VALUES ({self._placeholders(12)})
 					""",
 					params,
 				)
@@ -66,8 +75,8 @@ class PaperRepository:
 			cur = self.conn.cursor()
 			cur.execute(
 				f"""
-				INSERT INTO papers (title, authors, year, abstract, department, paper_type, research_domain, publisher, student, review_status, file_path)
-				VALUES ({self._placeholders(11)}) RETURNING id
+				INSERT INTO papers (title, authors, year, abstract, department, paper_type, research_domain, publisher, student, review_status, file_path, full_text)
+				VALUES ({self._placeholders(12)}) RETURNING id
 				""",
 				params,
 			)
@@ -75,6 +84,29 @@ class PaperRepository:
 			self.conn.commit()
 			cur.close()
 		return Paper(id=new_id, **{k: v for k, v in paper.__dict__.items() if k != "id"})
+
+	def update_full_text(self, paper_id: int, full_text: str) -> bool:
+		"""Update the full text content of a paper"""
+		try:
+			if DB_BACKEND == "sqlite":
+				with self.conn:
+					cur = self.conn.execute(
+						"UPDATE papers SET full_text = ? WHERE id = ?",
+						(full_text, paper_id)
+					)
+					return cur.rowcount > 0
+			else:
+				cur = self.conn.cursor()
+				cur.execute(
+					"UPDATE papers SET full_text = %s WHERE id = %s",
+					(full_text, paper_id)
+				)
+				self.conn.commit()
+				cur.close()
+				return cur.rowcount > 0
+		except Exception as e:
+			print(f"Error updating full text: {e}")
+			return False
 
 	def list_all(self) -> List[Paper]:
 		if DB_BACKEND == "sqlite":
@@ -134,18 +166,36 @@ class PaperRepository:
 			"department",
 		}:
 			raise ValueError("Unsupported field")
-		if DB_BACKEND == "sqlite":
-			cur = self.conn.execute(
-				f"SELECT DISTINCT {field_name} AS v FROM papers WHERE {field_name} IS NOT NULL AND {field_name} <> '' ORDER BY v ASC"
-			)
-			rows = cur.fetchall()
+		
+		# Handle integer fields differently
+		if field_name == "year":
+			if DB_BACKEND == "sqlite":
+				cur = self.conn.execute(
+					f"SELECT DISTINCT {field_name} AS v FROM papers WHERE {field_name} IS NOT NULL ORDER BY v ASC"
+				)
+				rows = cur.fetchall()
+			else:
+				cur = self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor)  # type: ignore[arg-type]
+				cur.execute(
+					f"SELECT DISTINCT {field_name} AS v FROM papers WHERE {field_name} IS NOT NULL ORDER BY v ASC"
+				)
+				rows = cur.fetchall()
+				cur.close()
 		else:
-			cur = self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor)  # type: ignore[arg-type]
-			cur.execute(
-				f"SELECT DISTINCT {field_name} AS v FROM papers WHERE {field_name} IS NOT NULL AND {field_name} <> '' ORDER BY v ASC"
-			)
-			rows = cur.fetchall()
-			cur.close()
+			# For text fields, check both NULL and empty string
+			if DB_BACKEND == "sqlite":
+				cur = self.conn.execute(
+					f"SELECT DISTINCT {field_name} AS v FROM papers WHERE {field_name} IS NOT NULL AND {field_name} <> '' ORDER BY v ASC"
+				)
+				rows = cur.fetchall()
+			else:
+				cur = self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor)  # type: ignore[arg-type]
+				cur.execute(
+					f"SELECT DISTINCT {field_name} AS v FROM papers WHERE {field_name} IS NOT NULL AND {field_name} <> '' ORDER BY v ASC"
+				)
+				rows = cur.fetchall()
+				cur.close()
+		
 		return [r["v"] if isinstance(r, sqlite3.Row) else r["v"] for r in rows]
 
 	def get_corpus(self) -> Tuple[list[int], list[str]]:

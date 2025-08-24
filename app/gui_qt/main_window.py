@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 	QMenu,
 	QFileDialog,
 	QMessageBox,
+	QProgressDialog,
 )
 from PySide6.QtCore import Qt
 from pathlib import Path
@@ -23,6 +24,7 @@ from ..repository import PaperRepository
 from ..models import Paper
 from ..search_engine import TfidfSearchEngine
 from ..utils.pdf_opener import open_pdf
+from ..utils.pdf_extractor import extract_pdf_text, get_pdf_stats
 
 
 class MainWindow(QMainWindow):
@@ -59,6 +61,12 @@ class MainWindow(QMainWindow):
 		file_menu.addAction("Import Paper", self._import_paper)
 		file_menu.addSeparator()
 		file_menu.addAction("Exit", self.close)
+		
+		# Performance monitoring for large collections
+		tools_menu = menubar.addMenu("Tools")
+		tools_menu.addAction("Performance Stats", self._show_performance_stats)
+		tools_menu.addAction("Clear Search Cache", self.search_engine.clear_cache)
+		tools_menu.addAction("Optimize for Large Collection", self.search_engine.optimize_for_large_collection)
 
 	def _build_body(self) -> None:
 		central = QWidget()
@@ -139,7 +147,9 @@ class MainWindow(QMainWindow):
 		if not paper:
 			QMessageBox.information(self, "Details", "Select a paper first.")
 			return
-		text = (
+		
+		# Show paper details including full text preview
+		details_text = (
 			f"Title: {paper.title}\n"
 			f"Authors: {paper.authors}\n"
 			f"Year: {paper.year}\n"
@@ -150,9 +160,17 @@ class MainWindow(QMainWindow):
 			f"Student: {paper.student}\n"
 			f"Review Status: {paper.review_status}\n"
 			f"PDF: {paper.file_path}\n\n"
-			f"Abstract:\n{paper.abstract}"
+			f"Abstract:\n{paper.abstract}\n\n"
 		)
-		QMessageBox.information(self, "Paper Details", text)
+		
+		# Add full text preview if available
+		if paper.full_text:
+			text_preview = paper.full_text[:500] + "..." if len(paper.full_text) > 500 else paper.full_text
+			details_text += f"Full Text Preview:\n{text_preview}"
+		else:
+			details_text += "Full Text: Not extracted yet"
+		
+		QMessageBox.information(self, "Paper Details", details_text)
 
 	def _choose_filter_and_list(self, field_name: str) -> None:
 		values = self.repo.get_distinct_values(field_name)
@@ -175,13 +193,32 @@ class MainWindow(QMainWindow):
 		pdf_path, _ = QFileDialog.getOpenFileName(self, "Select PDF", str(Path.cwd()), "PDF Files (*.pdf)")
 		if not pdf_path:
 			return
-		# Simple prompts via dialogs (for brevity). In production, build a full dialog.
-		def prompt(label: str, default: str = "") -> str:
-			text, ok = QFileDialog.getText(self, "Input", label)  # type: ignore[attr-defined]
-			# Note: QFileDialog.getText doesn't exist; to keep code concise, fallback with QMessageBox.
-			# We'll use a minimal workaround using QInputDialog instead.
-			return default
-
+		
+		# Show progress dialog for text extraction
+		progress = QProgressDialog("Extracting text from PDF...", "Cancel", 0, 100, self)
+		progress.setWindowModality(Qt.WindowModal)
+		progress.setValue(25)
+		progress.show()
+		
+		# Extract full text from PDF
+		full_text = ""
+		try:
+			full_text = extract_pdf_text(pdf_path)
+			if full_text:
+				progress.setValue(75)
+				QMessageBox.information(self, "Text Extraction", 
+					f"Successfully extracted {len(full_text.split())} words from PDF")
+			else:
+				QMessageBox.warning(self, "Text Extraction", 
+					"Could not extract text from PDF. Paper will be imported without full-text search.")
+		except Exception as e:
+			QMessageBox.warning(self, "Text Extraction", 
+				f"Text extraction failed: {e}. Paper will be imported without full-text search.")
+		
+		progress.setValue(100)
+		progress.close()
+		
+		# Get metadata from user
 		from PySide6.QtWidgets import QInputDialog
 		
 		def ask(label: str, default: str = "") -> str:
@@ -232,10 +269,38 @@ class MainWindow(QMainWindow):
 			student=student,
 			review_status=review_status,
 			file_path=str(dest),
+			full_text=full_text,  # Include extracted full text
 		)
-		self.repo.add_paper(paper)
-		self.search_engine.rebuild_index()
-		QMessageBox.information(self, "Import", "Paper imported successfully.")
+		
+		# Add paper to database
+		new_paper = self.repo.add_paper(paper)
+		
+		# Use batch processing for better performance
+		self.search_engine.batch_import_papers([new_paper])
+		
+		QMessageBox.information(self, "Import", 
+			f"Paper imported successfully!\n"
+			f"Title: {title}\n"
+			f"Full text extracted: {'Yes' if full_text else 'No'}\n"
+			f"Total papers: {len(self.repo.list_all())}")
+
+	def _show_performance_stats(self) -> None:
+		"""Show performance statistics for monitoring large collections."""
+		stats = self.search_engine.get_performance_stats()
+		
+		stats_text = (
+			f"Performance Statistics:\n\n"
+			f"Total Papers: {stats['total_papers']}\n"
+			f"Index Features: {stats['index_features']}\n"
+			f"Cache Size: {stats['cache_size']}\n"
+			f"Memory Usage: {stats['memory_usage_mb']:.2f} MB\n"
+			f"Last Index Update: {stats['last_update']}\n\n"
+			f"Search Cache: {'Enabled' if ENABLE_CACHING else 'Disabled'}\n"
+			f"Batch Indexing: {'Enabled' if BATCH_INDEXING else 'Disabled'}\n"
+			f"Max Features: {MAX_FEATURES}"
+		)
+		
+		QMessageBox.information(self, "Performance Stats", stats_text)
 
 
 def launch_app() -> None:

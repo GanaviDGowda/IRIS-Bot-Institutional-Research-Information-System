@@ -16,6 +16,7 @@ class Paper:
 	student: str
 	review_status: str
 	file_path: str
+	full_text: str = ""  # New field for extracted PDF text
 
 	def to_corpus_text(self) -> str:
 		parts = [
@@ -28,5 +29,6 @@ class Paper:
 			self.student or "",
 			self.paper_type or "",
 			self.review_status or "",
+			self.full_text or "",  # Include full PDF text for search
 		]
 		return "\n".join(p for p in parts if p) 

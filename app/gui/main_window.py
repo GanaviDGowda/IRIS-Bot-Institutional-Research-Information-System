@@ -23,7 +23,7 @@ class MainWindow:
 		init_db(self.conn)
 		self.repo = PaperRepository(self.conn)
 		self.search_engine = TfidfSearchEngine(self.repo)
-		self.search_engine.rebuild_index()
+		# Remove manual rebuild_index() call - search engine handles this automatically
 
 		# UI elements
 		self._build_menu()

@@ -28,6 +28,39 @@ def get_connection(dsn: Optional[str] = None) -> DbConn:
 	return conn
 
 
+def _add_full_text_column(conn: DbConn) -> None:
+	"""Add full_text column to existing databases if it doesn't exist."""
+	if DB_BACKEND == "sqlite":
+		assert isinstance(conn, sqlite3.Connection)
+		# Check if full_text column exists
+		cursor = conn.execute("PRAGMA table_info(papers)")
+		columns = [column[1] for column in cursor.fetchall()]
+		
+		if "full_text" not in columns:
+			with conn:
+				conn.execute("ALTER TABLE papers ADD COLUMN full_text TEXT")
+				print("Added full_text column to SQLite database")
+	else:
+		# PostgreSQL
+		cursor = conn.cursor()
+		try:
+			# Check if full_text column exists
+			cursor.execute("""
+				SELECT column_name 
+				FROM information_schema.columns 
+				WHERE table_name = 'papers' AND column_name = 'full_text'
+			""")
+			
+			if not cursor.fetchone():
+				cursor.execute("ALTER TABLE papers ADD COLUMN full_text TEXT")
+				conn.commit()
+				print("Added full_text column to PostgreSQL database")
+		except Exception as e:
+			print(f"Error checking/adding full_text column: {e}")
+		finally:
+			cursor.close()
+
+
 def init_db(conn: Optional[DbConn] = None) -> None:
 	own_conn = False
 	if conn is None:
@@ -52,6 +85,7 @@ def init_db(conn: Optional[DbConn] = None) -> None:
 					student TEXT,
 					review_status TEXT,
 					file_path TEXT NOT NULL,
+					full_text TEXT,
 					created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 				);
 				CREATE INDEX IF NOT EXISTS idx_papers_year ON papers(year);
@@ -77,6 +111,7 @@ def init_db(conn: Optional[DbConn] = None) -> None:
 				student TEXT,
 				review_status TEXT,
 				file_path TEXT NOT NULL,
+				full_text TEXT,
 				created_at TIMESTAMPTZ DEFAULT NOW()
 			);
 			CREATE INDEX IF NOT EXISTS idx_papers_year ON papers(year);
@@ -86,6 +121,9 @@ def init_db(conn: Optional[DbConn] = None) -> None:
 		)
 		conn.commit()
 		cur.close()
+
+	# Add full_text column to existing databases
+	_add_full_text_column(conn)
 
 	if own_conn:
 		conn.close()  # type: ignore[arg-type] 
