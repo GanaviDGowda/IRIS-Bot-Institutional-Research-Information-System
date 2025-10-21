@@ -1,7 +1,36 @@
+# Core GUI Framework
 PySide6>=6.6
+
+# Database
 psycopg2-binary>=2.9
+SQLAlchemy>=2.0.0
+
+# PDF Processing & Text Extraction
+PyMuPDF>=1.23.0
+PyPDF2>=3.0.0
+pdfplumber>=0.9.0
+
+# Machine Learning & NLP
 scikit-learn>=1.2.2
 numpy>=1.23
 scipy>=1.10
-PyPDF2>=3.0.0
-pdfplumber>=0.9.0 
+sentence-transformers>=2.2.0
+transformers>=4.30.0
+
+# API & Web Requests
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Vector Database Support
+pgvector>=0.2.0
+
+# Data Processing
+pandas>=2.0.0
+python-dateutil>=2.8.0
+
+# PDF Generation
+reportlab>=4.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+tqdm>=4.65.0
