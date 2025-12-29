@@ -74,7 +74,6 @@ class CrossrefAPIFetcher:
             
             # Make API request
             url = f"{self.base_url}/{doi}"
-            logger.info(f"Fetching metadata from Crossref for DOI: {doi}")
             
             response = self.session.get(url, timeout=10)
             
@@ -175,7 +174,6 @@ class CrossrefAPIFetcher:
             metadata.issue = message.get('issue', '')
             metadata.pages = message.get('page', '')
             
-            logger.info(f"Successfully fetched metadata for DOI: {doi}")
             return metadata
             
         except Exception as e:
@@ -321,7 +319,6 @@ class CrossrefAPIFetcher:
                 
                 # Only return if match score is reasonable (>0.6)
                 if match_score > 0.6:
-                    logger.info(f"Found DOI via search: {best_match.doi} (score: {match_score:.2f})")
                     return best_match.doi
                 else:
                     logger.warning(f"Match score too low: {match_score:.2f}")

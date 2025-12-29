@@ -19,14 +19,27 @@ class SemanticSearchEngine:
     def __init__(self, paper_repo=None):
         """
         Initialize the semantic search engine.
-        
-        Args:
-            paper_repo: Paper repository instance (optional, will get from unified DB if not provided)
         """
         self.paper_repo = paper_repo or get_unified_paper_repository()
         self.embedder = semantic_embedder
-        self.embeddings_cache = {}  # Cache for embeddings
-        self.paper_embeddings = {}  # paper_id -> embedding mapping
+        self.embeddings_cache = {}
+        self.paper_embeddings = {}
+
+        # ✅ NEW: detect DB vector capability
+        try:
+            self.vector_enabled = self.paper_repo.db_manager.is_vector_enabled()
+        except Exception:
+            self.vector_enabled = False
+
+        if not self.vector_enabled:
+            logger.info(
+                "SemanticSearchEngine running in IN-MEMORY mode (pgvector not available)"
+            )
+        else:
+            logger.info(
+                "SemanticSearchEngine running in DATABASE VECTOR mode"
+            )
+
     
     def generate_all_embeddings(self) -> Dict[int, np.ndarray]:
         """
@@ -87,18 +100,15 @@ class SemanticSearchEngine:
                include_metadata: bool = True) -> List[Tuple[Any, float]]:
         """
         Perform semantic search.
+
+        Design note:
+        - If PostgreSQL pgvector is available → DB vector search can be used.
+        - Otherwise → SentenceTransformer in-memory cosine similarity is used.
         
-        Args:
-            query: Search query
-            top_k: Number of results to return
-            threshold: Minimum similarity threshold
-            include_metadata: Whether to include paper objects or just IDs
-            
-        Returns:
-            List of (paper, similarity_score) tuples
+        Current implementation uses in-memory embeddings for portability.
         """
         try:
-            # Generate query embedding
+            # In-memory semantic search path (pgvector-independent)
             query_embedding = self.embedder.generate_embedding(query)
             
             # Get all paper embeddings if not cached

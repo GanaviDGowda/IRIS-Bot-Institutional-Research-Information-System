@@ -12,7 +12,6 @@ SQLITE_DB_PATH = DATA_DIR / "database.db"
 DB_BACKEND = os.environ.get("APP_DB_BACKEND", "postgres").lower()
 
 # PostgreSQL connection settings
-# TODO: Replace YOUR_ACTUAL_PASSWORD with your real PostgreSQL password
 POSTGRES_DSN = os.environ.get(
     "APP_POSTGRES_DSN",
     "dbname=research user=postgres password=Ganu@2004 host=localhost port=5432",

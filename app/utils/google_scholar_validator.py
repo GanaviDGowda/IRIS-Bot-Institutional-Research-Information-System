@@ -40,12 +40,36 @@ class GoogleScholarValidator:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
         self.base_url = "https://scholar.google.com/scholar"
-        self.rate_limit_delay = 2.0  # Be respectful to Google
+        self.rate_limit_delay = 5.0  # Increased delay to be more respectful to Google
         self.last_request_time = 0
+        self.max_retries = 3
+        self.retry_delays = [10.0, 30.0, 60.0]  # Exponential backoff delays in seconds
+        self.is_blocked = False  # Track if Google Scholar is currently blocked
+        self.blocked_until = 0  # Timestamp when block expires (0 = not blocked)
+    
+    def is_currently_blocked(self) -> bool:
+        """
+        Check if Google Scholar is currently blocked.
+        
+        Returns:
+            True if blocked, False otherwise
+        """
+        if not self.is_blocked:
+            return False
+        
+        # Check if block has expired (after 1 hour)
+        if self.blocked_until > 0 and time.time() > self.blocked_until:
+            logger.info("Google Scholar block expired, resetting status")
+            self.is_blocked = False
+            self.blocked_until = 0
+            return False
+        
+        return self.is_blocked
     
     def search_paper(self, title: str, authors: str = "", year: int = 0) -> ScholarMetadata:
         """
-        Search for a paper in Google Scholar.
+        Search for a paper in Google Scholar with retry logic for rate limits.
+        Fails fast if blocked/captcha detected.
         
         Args:
             title: Paper title
@@ -55,47 +79,98 @@ class GoogleScholarValidator:
         Returns:
             ScholarMetadata object
         """
+        # Check if we're already blocked
+        if self.is_currently_blocked():
+            logger.warning("Google Scholar is currently blocked, skipping search")
+            return ScholarMetadata(error="Google Scholar is currently blocked")
+        
         if not title or len(title) < 5:
             return ScholarMetadata(error="Title too short")
         
-        try:
-            self._respect_rate_limit()
-            
-            # Build search query
-            query = title
-            if authors:
-                query += f" {authors.split(',')[0]}"  # Add first author
-            
-            logger.info(f"Searching Google Scholar for: {query[:50]}...")
-            
-            # Search Google Scholar
-            params = {
-                'q': query,
-                'hl': 'en',
-                'as_sdt': '0,5'  # Include patents and citations
-            }
-            
-            response = self.session.get(
-                self.base_url,
-                params=params,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                return self._parse_results(response.text, title, year)
-            elif response.status_code == 429:
-                logger.warning("Google Scholar rate limit hit")
-                return ScholarMetadata(error="Rate limit exceeded")
-            else:
-                logger.error(f"Google Scholar error: {response.status_code}")
-                return ScholarMetadata(error=f"HTTP {response.status_code}")
+        # Build search query
+        query = title
+        if authors:
+            query += f" {authors.split(',')[0]}"  # Add first author
+        
+        # Try with retries for rate limiting
+        for attempt in range(self.max_retries + 1):
+            try:
+                self._respect_rate_limit()
                 
-        except requests.Timeout:
-            logger.error("Google Scholar timeout")
-            return ScholarMetadata(error="Timeout")
-        except Exception as e:
-            logger.error(f"Google Scholar error: {e}")
-            return ScholarMetadata(error=str(e))
+                logger.info(f"Searching Google Scholar for: {query[:50]}... (attempt {attempt + 1}/{self.max_retries + 1})")
+                
+                # Search Google Scholar
+                params = {
+                    'q': query,
+                    'hl': 'en',
+                    'as_sdt': '0,5'  # Include patents and citations
+                }
+                
+                response = self.session.get(
+                    self.base_url,
+                    params=params,
+                    timeout=15  # Increased timeout
+                )
+                
+                # Check for captcha or blocking - FAIL FAST (no retries)
+                if self._is_blocked_or_captcha(response.text):
+                    logger.error("Google Scholar blocked/captcha detected - marking as blocked and failing fast")
+                    # Mark as blocked for 1 hour
+                    self.is_blocked = True
+                    self.blocked_until = time.time() + 3600  # Block for 1 hour
+                    return ScholarMetadata(error="Blocked by Google Scholar (captcha or IP block)")
+                
+                if response.status_code == 200:
+                    # Success - reset block status if it was set
+                    if self.is_blocked:
+                        logger.info("Google Scholar access restored")
+                        self.is_blocked = False
+                        self.blocked_until = 0
+                    return self._parse_results(response.text, title, year)
+                elif response.status_code == 429:
+                    if attempt < self.max_retries:
+                        wait_time = self.retry_delays[min(attempt, len(self.retry_delays) - 1)]
+                        logger.warning(f"Google Scholar rate limit hit. Waiting {wait_time}s before retry...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error("Google Scholar rate limit exceeded after all retries")
+                        return ScholarMetadata(error="Rate limit exceeded")
+                elif response.status_code == 503:
+                    # Service unavailable - retry with delay
+                    if attempt < self.max_retries:
+                        wait_time = self.retry_delays[min(attempt, len(self.retry_delays) - 1)]
+                        logger.warning(f"Google Scholar service unavailable. Waiting {wait_time}s before retry...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error("Google Scholar service unavailable after all retries")
+                        return ScholarMetadata(error="Service unavailable")
+                else:
+                    logger.error(f"Google Scholar error: {response.status_code}")
+                    return ScholarMetadata(error=f"HTTP {response.status_code}")
+                    
+            except requests.Timeout:
+                if attempt < self.max_retries:
+                    wait_time = self.retry_delays[min(attempt, len(self.retry_delays) - 1)] / 2
+                    logger.warning(f"Google Scholar timeout. Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error("Google Scholar timeout after all retries")
+                    return ScholarMetadata(error="Timeout")
+            except Exception as e:
+                if attempt < self.max_retries:
+                    wait_time = self.retry_delays[min(attempt, len(self.retry_delays) - 1)] / 2
+                    logger.warning(f"Google Scholar error: {e}. Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"Google Scholar error after all retries: {e}")
+                    return ScholarMetadata(error=str(e))
+        
+        # Should not reach here, but just in case
+        return ScholarMetadata(error="Failed after all retries")
     
     def validate_by_title(self, title: str, authors: str = "") -> bool:
         """
@@ -122,6 +197,43 @@ class GoogleScholarValidator:
             time.sleep(sleep_time)
         
         self.last_request_time = time.time()
+    
+    def _is_blocked_or_captcha(self, html: str) -> bool:
+        """
+        Check if the response indicates a captcha or blocking.
+        
+        Args:
+            html: HTML content from response
+            
+        Returns:
+            True if blocked/captcha detected
+        """
+        if not html:
+            return False
+        
+        html_lower = html.lower()
+        
+        # Check for common captcha/block indicators
+        captcha_indicators = [
+            'captcha',
+            'sorry, but your computer or network',
+            'our systems have detected unusual traffic',
+            'unusual traffic from your computer network',
+            'please show you\'re not a robot',
+            'ip address may be compromised'
+        ]
+        
+        for indicator in captcha_indicators:
+            if indicator in html_lower:
+                return True
+        
+        # Check if it's not a search results page (might be blocked)
+        if 'gs_ri' not in html and 'scholar.google.com' in html:
+            # Check if it looks like an error or blocking page
+            if any(indicator in html_lower for indicator in ['error', 'blocked', 'forbidden', 'access denied']):
+                return True
+        
+        return False
     
     def _parse_results(self, html: str, query_title: str, query_year: int = 0) -> ScholarMetadata:
         """Parse Google Scholar search results."""
@@ -254,6 +366,12 @@ def validate_paper_scholar(title: str, authors: str = "", year: int = 0) -> Scho
         ScholarMetadata object
     """
     return google_scholar_validator.search_paper(title, authors, year)
+
+
+
+
+
+
 
 
 

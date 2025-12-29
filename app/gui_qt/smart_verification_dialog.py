@@ -61,7 +61,6 @@ class SmartVerificationWorker(QThread):
                 
                 try:
                     result = self.verifier.verify_paper(paper)
-                    logger.info(f"Verification result for paper {paper.get('id', 'unknown')}: status={result.status}, confidence={result.confidence_score}, has_metadata={bool(result.verified_metadata)}")
                     results.append(result)
                     self.paper_verified.emit(result)
                     self.progress_updated.emit(i + 1, total_papers)
@@ -476,7 +475,6 @@ class SmartVerificationDialog(QDialog):
     
     def verification_finished(self, results: List[VerificationResult]):
         """Handle verification completion."""
-        logger.info(f"Verification finished with {len(results)} results")
         self.verification_results = results
         self.progress_bar.setVisible(False)
         self.status_label.setText(f"Verification complete: {len(results)} papers processed")
@@ -491,7 +489,6 @@ class SmartVerificationDialog(QDialog):
         
         # Auto-apply verification results if we have a repository
         if self.paper_repo and results:
-            logger.info(f"Auto-applying {len(results)} verification results")
             self._auto_apply_verification_results(results)
         else:
             logger.warning(f"No repository or no results: repo={bool(self.paper_repo)}, results={len(results)}")
@@ -507,17 +504,12 @@ class SmartVerificationDialog(QDialog):
     def _auto_apply_verification_results(self, results: List[VerificationResult]):
         """Automatically apply verification results to the database."""
         try:
-            logger.info(f"Auto-applying {len(results)} verification results")
             updated_count = 0
             for result in results:
-                logger.info(f"Processing result for paper {result.paper_id}: status={result.status}, has_metadata={bool(result.verified_metadata)}")
-                logger.info(f"Verified metadata content: {result.verified_metadata}")
                 # Apply all verification results, even if they don't have verified_metadata
                 if result.status in [VerificationStatus.VERIFIED, VerificationStatus.PARTIAL]:
-                    logger.info(f"Updating paper {result.paper_id} with status {result.status.value}")
                     # Use empty dict if no verified_metadata
                     metadata_to_apply = result.verified_metadata if result.verified_metadata else {}
-                    logger.info(f"Metadata to apply: {metadata_to_apply}")
                     if self.paper_repo.update_verification_status(
                         result.paper_id, 
                         result.status.value, 
@@ -526,7 +518,6 @@ class SmartVerificationDialog(QDialog):
                         metadata_to_apply
                     ):
                         updated_count += 1
-                        logger.info(f"Successfully updated paper {result.paper_id}")
                     else:
                         logger.error(f"Failed to update paper {result.paper_id}")
                 else:

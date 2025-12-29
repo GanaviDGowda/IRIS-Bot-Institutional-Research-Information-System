@@ -180,26 +180,6 @@ class MetadataCorrectionDialog(QDialog):
         self.research_domain_combo.setEditable(True)
         self.research_domain_combo.setPlaceholderText("Select or enter research domain...")
         
-        # Published month filter combo (define before using in layout)
-        self.published_month_combo = QComboBox()
-        self.published_month_combo.addItems([
-            "All", "January", "February", "March", "April", "May", "June",
-            "July", "August", "September", "October", "November", "December"
-        ])
-        
-        # Published month filter
-        self.published_month_combo = QComboBox()
-        self.published_month_combo.addItems([
-            "All", "January", "February", "March", "April", "May", "June",
-            "July", "August", "September", "October", "November", "December"
-        ])
-        # Published month filter
-        self.published_month_combo = QComboBox()
-        self.published_month_combo.addItems([
-            "All", "January", "February", "March", "April", "May", "June",
-            "July", "August", "September", "October", "November", "December"
-        ])
-        
         # Keywords
         self.keywords_edit = QTextEdit()
         self.keywords_edit.setMaximumHeight(100)
@@ -299,7 +279,6 @@ class MetadataCorrectionDialog(QDialog):
             # Load departments from department manager
             departments = get_all_departments()
             self.department_combo.addItems(departments)
-            logger.info(f"Loaded {len(departments)} departments for classification")
         except Exception as e:
             logger.error(f"Error loading departments for classification: {e}")
             # Fallback to basic departments
@@ -693,7 +672,6 @@ class EnhancedMainWindow(QMainWindow):
         try:
             departments = get_all_departments()
             self.search_widget.department_combo.addItems(departments)
-            logger.info(f"Loaded {len(departments)} departments from department manager")
         except Exception as e:
             logger.error(f"Error loading departments: {e}")
             # Fallback to basic departments
@@ -832,7 +810,6 @@ class EnhancedMainWindow(QMainWindow):
             }
             
             new_paper_id = self.paper_repo.add_paper(paper_data)
-            logger.info(f"Imported paper {new_paper_id}: {data['title']}")
             
         except Exception as e:
             logger.error(f"Error importing paper: {e}")
@@ -921,19 +898,14 @@ class EnhancedMainWindow(QMainWindow):
     
     def _apply_filters(self, papers: List[Dict[str, Any]], filters: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Apply filters to the paper list."""
-        logger.info(f"Applying filters: {filters}")
-        logger.info(f"Total papers before filtering: {len(papers)}")
-        
         filtered_papers = papers.copy()
         
         # Year filter
         if 'year_from' in filters:
             filtered_papers = [p for p in filtered_papers if p.get('year', 0) >= filters['year_from']]
-            logger.info(f"After year_from filter: {len(filtered_papers)} papers")
         
         if 'year_to' in filters:
             filtered_papers = [p for p in filtered_papers if p.get('year', 0) <= filters['year_to']]
-            logger.info(f"After year_to filter: {len(filtered_papers)} papers")
         # Month range filter within the selected year range (if provided)
         month_name_to_num = {
             'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
@@ -953,39 +925,32 @@ class EnhancedMainWindow(QMainWindow):
                     return False
                 mn = month_name_to_num[m]
                 return start_num <= mn <= end_num
-            before = len(filtered_papers)
             filtered_papers = [p for p in filtered_papers if in_month_range(p)]
-            logger.info(f"After month range filter ({month_from or 'Jan'}-{month_to or 'Dec'}): {len(filtered_papers)} of {before}")
         
         # Journal filter
         if 'journal' in filters and filters['journal']:
             journal_filter = filters['journal'].lower()
             filtered_papers = [p for p in filtered_papers 
                              if journal_filter in p.get('journal', '').lower()]
-            logger.info(f"After journal filter: {len(filtered_papers)} papers")
         
         # Indexing status filter
         if 'indexing_status' in filters and filters['indexing_status'] != 'All':
             indexing_filter = filters['indexing_status']
             filtered_papers = [p for p in filtered_papers 
                              if p.get('metadata', {}).get('indexing_status', '') == indexing_filter]
-            logger.info(f"After indexing status filter: {len(filtered_papers)} papers")
         
         # Department filter
         if 'department' in filters and filters['department']:
             dept_filter = filters['department'].lower()
             filtered_papers = [p for p in filtered_papers 
                              if dept_filter in p.get('metadata', {}).get('department', '').lower()]
-            logger.info(f"After department filter: {len(filtered_papers)} papers")
         
         # Research domain filter
         if 'research_domain' in filters and filters['research_domain']:
             domain_filter = filters['research_domain'].lower()
             filtered_papers = [p for p in filtered_papers 
                              if domain_filter in p.get('metadata', {}).get('research_domain', '').lower()]
-            logger.info(f"After research domain filter: {len(filtered_papers)} papers")
         
-        logger.info(f"Total papers after all filters: {len(filtered_papers)}")
         return filtered_papers
 
     def _clear_search(self):
@@ -1070,9 +1035,19 @@ class EnhancedMainWindow(QMainWindow):
         
         table.setRowCount(len(similar_papers))
         for row, (paper, similarity) in enumerate(similar_papers):
-            table.setItem(row, 0, QTableWidgetItem(paper.title))
-            table.setItem(row, 1, QTableWidgetItem(paper.authors))
-            table.setItem(row, 2, QTableWidgetItem(str(paper.year)))
+            # Handle both dict and object formats
+            if isinstance(paper, dict):
+                title = paper.get('title', 'Unknown')
+                authors = paper.get('authors', 'N/A')
+                year = paper.get('year', 'N/A')
+            else:
+                title = getattr(paper, 'title', 'Unknown')
+                authors = getattr(paper, 'authors', 'N/A')
+                year = getattr(paper, 'year', 'N/A')
+            
+            table.setItem(row, 0, QTableWidgetItem(str(title)))
+            table.setItem(row, 1, QTableWidgetItem(str(authors)))
+            table.setItem(row, 2, QTableWidgetItem(str(year)))
             table.setItem(row, 3, QTableWidgetItem(f"{similarity:.3f}"))
         
         # Resize columns
@@ -1089,56 +1064,6 @@ class EnhancedMainWindow(QMainWindow):
         
         dialog.exec()
     
-    def _open_paper_details(self, row: int, column: int):
-        """Open paper details dialog."""
-        try:
-            paper_id = self.results_table.item(row, 0).data(Qt.UserRole)
-            if paper_id is None:
-                return
-            
-            paper = self.paper_repo.get_by_id(paper_id)
-            if paper is None:
-                return
-            
-            # Create details dialog
-            dialog = QDialog(self)
-            dialog.setWindowTitle(f"Paper Details - {paper.title[:50]}...")
-            dialog.setModal(True)
-            dialog.resize(600, 500)
-            
-            layout = QVBoxLayout(dialog)
-            
-            # Paper details
-            details_text = QTextEdit()
-            details_text.setReadOnly(True)
-            
-            details = f"""
-Title: {paper.title}
-Authors: {paper.authors}
-Year: {paper.year}
-Abstract: {paper.abstract}
-Department: {paper.department}
-Research Domain: {paper.research_domain}
-Publisher: {paper.publisher}
-File Path: {paper.file_path}
-            """
-            
-            details_text.setPlainText(details.strip())
-            layout.addWidget(details_text)
-            
-            # Buttons
-            button_layout = QHBoxLayout()
-            close_button = QPushButton("Close")
-            close_button.clicked.connect(dialog.accept)
-            button_layout.addStretch()
-            button_layout.addWidget(close_button)
-            layout.addLayout(button_layout)
-            
-            dialog.exec()
-            
-        except Exception as e:
-            logger.error(f"Error opening paper details: {e}")
-            QMessageBox.critical(self, "Error", f"Failed to open paper details: {e}")
     
     def _populate_results_table(self, papers: List[Dict[str, Any]]):
         """Populate results table with papers."""
@@ -1708,29 +1633,6 @@ File Path: {paper.file_path}
         except Exception as e:
             QMessageBox.critical(self, "Delete Error", f"Error deleting all papers: {e}")
     
-    def _show_context_menu(self, position):
-        """Show context menu for results table."""
-        if self.results_table.itemAt(position):
-            menu = QMenu(self)
-            
-            # Open PDF action
-            open_action = menu.addAction("Open PDF")
-            open_action.triggered.connect(self._open_selected_pdf)
-            
-            # Edit metadata action
-            edit_action = menu.addAction("Edit Metadata")
-            edit_action.triggered.connect(self._edit_selected_metadata)
-            
-            menu.addSeparator()
-            
-            # Delete actions
-            delete_single_action = menu.addAction("Delete This Paper")
-            delete_single_action.triggered.connect(self._delete_selected_paper)
-            
-            delete_multiple_action = menu.addAction("Delete Selected Papers")
-            delete_multiple_action.triggered.connect(self._delete_selected_papers)
-            
-            menu.exec(self.results_table.mapToGlobal(position))
     
     def _verify_papers(self):
         """Verify papers using DOI, ISSN, and author+title validation."""
@@ -1760,7 +1662,6 @@ File Path: {paper.file_path}
     def _refresh_after_verification(self):
         """Refresh the main window data after verification updates."""
         try:
-            logger.info("Refreshing main window data after verification updates")
             # Refresh the search results to show updated data
             self._perform_search()
         except Exception as e:
@@ -2129,11 +2030,12 @@ File Path: {paper.file_path}
             for i, paper in enumerate(papers):
                 try:
                     progress.setValue(i)
-                    progress.setLabelText(f"Refreshing citations for paper {i+1}/{len(papers)}: {paper.title[:50]}...")
+                    paper_title = paper.get('title', 'Unknown') or 'Unknown'
+                    progress.setLabelText(f"Refreshing citations for paper {i+1}/{len(papers)}: {paper_title[:50]}...")
                     
                     # Fetch citation data
                     citation_data = fetch_citation_data(
-                        paper.doi, paper.title, paper.journal, paper.year
+                        paper.get('doi'), paper.get('title'), paper.get('journal'), paper.get('year')
                     )
                     
                     if citation_data.success:
@@ -2240,13 +2142,14 @@ File Path: {paper.file_path}
             for i, paper in enumerate(papers):
                 try:
                     progress.setValue(i)
-                    progress.setLabelText(f"Updating indexing status for paper {i+1}/{len(papers)}: {paper.title[:50]}...")
+                    paper_title = paper.get('title', 'Unknown') or 'Unknown'
+                    progress.setLabelText(f"Updating indexing status for paper {i+1}/{len(papers)}: {paper_title[:50]}...")
                     
                     # Create metadata dict for indexing status determination
                     metadata = {
-                        'journal': paper.journal or '',
-                        'publisher': paper.publisher or '',
-                        'issn': getattr(paper, 'issn', '') or ''
+                        'journal': paper.get('journal', '') or '',
+                        'publisher': paper.get('publisher', '') or '',
+                        'issn': paper.get('issn', '') or ''
                     }
                     
                     # Determine indexing status
@@ -2316,7 +2219,6 @@ File Path: {paper.file_path}
     def _refresh_ui(self):
         """Refresh the UI after code changes."""
         try:
-            logger.info("Refreshing UI due to code changes...")
             
             # Show a notification to the user
             from PySide6.QtWidgets import QMessageBox
@@ -2330,7 +2232,6 @@ File Path: {paper.file_path}
             # Refresh the search results to show any data changes
             self._perform_search()
             
-            logger.info("UI refresh completed")
             
         except Exception as e:
             logger.error(f"Failed to refresh UI: {e}")
@@ -2380,14 +2281,6 @@ File Path: {paper.file_path}
         )
     
     def closeEvent(self, event):
-        """Handle application close event."""
-        try:
-            # Clean up resources
-            logger.info("Application closing")
-        except Exception as e:
-            logger.error(f"Error during application close: {e}")
-        
-        # Call parent close event
         super().closeEvent(event)
     
     def keyPressEvent(self, event):

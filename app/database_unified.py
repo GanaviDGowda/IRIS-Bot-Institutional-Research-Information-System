@@ -74,7 +74,6 @@ class UnifiedDatabaseManager:
             # Create tables
             self._create_postgresql_tables()
             
-            logger.info("PostgreSQL unified database setup completed")
             
         except Exception as e:
             logger.error(f"Error setting up PostgreSQL: {e}")
@@ -86,7 +85,6 @@ class UnifiedDatabaseManager:
         self.engine = create_engine(f"sqlite:///{SQLITE_DB_PATH}")
         self.session_factory = sessionmaker(bind=self.engine)
         self._create_sqlite_tables()
-        logger.info("SQLite unified database setup completed")
     
     def _enable_pgvector(self):
         """Enable pgvector extension for vector operations."""
@@ -94,10 +92,8 @@ class UnifiedDatabaseManager:
             with self.engine.connect() as conn:
                 conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
                 conn.commit()
-                logger.info("pgvector extension enabled successfully")
         except Exception as e:
             logger.warning(f"Could not enable pgvector extension: {e}")
-            logger.info("Continuing without pgvector support...")
     
     def _create_postgresql_tables(self):
         """Create PostgreSQL tables with normalized structure."""
@@ -114,7 +110,6 @@ class UnifiedDatabaseManager:
             table_exists = result.fetchone()[0]
             
             if table_exists:
-                logger.info("Unified tables already exist. Skipping creation.")
                 return
         
         # Core papers table - only essential fields
@@ -574,10 +569,24 @@ class UnifiedPaperRepository:
     
     def update_verification_status(self, paper_id: int, status: str, method: str, 
                                  confidence: float, verified_metadata: Dict[str, Any]) -> bool:
-        """Update verification status for a paper with retry on transient DB errors."""
+        """Update verification status for a paper with retry on transient DB errors.
+        
+        This method now intelligently preserves existing metadata and only updates fields
+        that are missing or where the verified value is clearly better (high confidence).
+        For PARTIAL verification, it's more conservative about overwriting existing data.
+        """
         for attempt in range(3):
             session = self.db_manager.get_session()
             try:
+                # Get original paper data to preserve existing metadata
+                original_paper = self._get_paper_by_id_within_session(session, paper_id)
+                
+                # Filter verified_metadata to only include safe updates
+                if verified_metadata and original_paper:
+                    verified_metadata = self._filter_safe_metadata_updates(
+                        original_paper, verified_metadata, status, confidence
+                    )
+                
                 # Update verification fields in main table
                 verification_updates = {
                     'verification_status': status,
@@ -605,7 +614,7 @@ class UnifiedPaperRepository:
                     WHERE id = :paper_id
                 """), verification_updates)
                 
-                # Update metadata if provided
+                # Update metadata if provided (now filtered to safe updates only)
                 if verified_metadata:
                     # Use same session to keep transaction boundaries
                     self._update_within_session(session, paper_id, verified_metadata)
@@ -626,6 +635,122 @@ class UnifiedPaperRepository:
                 session.close()
         return False
 
+    def _get_paper_by_id_within_session(self, session, paper_id: int) -> Optional[Dict[str, Any]]:
+        """Get paper by ID within an existing session."""
+        try:
+            if DB_BACKEND == "postgres":
+                result = session.execute(text("""
+                    SELECT p.id, p.title, p.authors, p.year, p.abstract, p.doi, p.journal, p.publisher,
+                           p.file_path, p.full_text, p.is_duplicate, p.duplicate_of_id, p.similarity_score,
+                           pm.department, pm.research_domain, pm.paper_type, pm.student, pm.review_status, 
+                           pm.indexing_status, pm.issn, pm.published_month,
+                           cd.citation_count, cd.scimago_quartile, cd.impact_factor, cd.h_index, 
+                           cd.citation_source, cd.citation_updated_at
+                    FROM papers_unified p
+                    LEFT JOIN paper_metadata pm ON p.id = pm.paper_id
+                    LEFT JOIN citation_data cd ON p.id = cd.paper_id
+                    WHERE p.id = :paper_id
+                """), {'paper_id': paper_id})
+            else:
+                result = session.execute(text("""
+                    SELECT p.id, p.title, p.authors, p.year, p.abstract, p.doi, p.journal, p.publisher,
+                           p.file_path, p.full_text, p.is_duplicate, p.duplicate_of_id, p.similarity_score,
+                           pm.department, pm.research_domain, pm.paper_type, pm.student, pm.review_status, 
+                           pm.indexing_status, pm.issn, pm.published_month,
+                           cd.citation_count, cd.scimago_quartile, cd.impact_factor, cd.h_index, 
+                           cd.citation_source, cd.citation_updated_at
+                    FROM papers_unified p
+                    LEFT JOIN paper_metadata pm ON p.id = pm.paper_id
+                    LEFT JOIN citation_data cd ON p.id = cd.paper_id
+                    WHERE p.id = :paper_id
+                """), {'paper_id': paper_id})
+            
+            row = result.fetchone()
+            if row:
+                return dict(row._mapping)
+            return None
+        except Exception as e:
+            logger.error(f"Error getting paper {paper_id} within session: {e}")
+            return None
+    
+    def _filter_safe_metadata_updates(self, original: Dict[str, Any], verified: Dict[str, Any], 
+                                     status: str, confidence: float) -> Dict[str, Any]:
+        """Filter verified metadata to only include safe updates that won't overwrite good existing data.
+        
+        Rules:
+        - For VERIFIED status with high confidence (>=0.8): Update all provided fields
+        - For PARTIAL status: Only update missing/empty fields or fields where verified value is clearly better
+        - Never overwrite non-empty fields with empty values
+        - For low confidence (<0.6): Only fill in missing fields
+        """
+        safe_updates = {}
+        
+        # Fields that are safe to update even with partial verification (identifiers)
+        safe_identifier_fields = ['doi', 'issn']
+        
+        # Fields that should only be updated with high confidence
+        high_confidence_fields = ['title', 'authors', 'abstract', 'journal', 'publisher', 'year']
+        
+        # Metadata fields that are usually safe to update if missing
+        metadata_fields = ['department', 'research_domain', 'paper_type', 'student', 
+                          'review_status', 'indexing_status', 'published_month']
+        
+        is_verified = (status == 'verified')
+        is_partial = (status == 'partial')
+        high_confidence = (confidence >= 0.8)
+        medium_confidence = (confidence >= 0.6)
+        
+        for key, verified_value in verified.items():
+            if verified_value is None:
+                continue
+            
+            # Convert to string for comparison if needed
+            if isinstance(verified_value, str):
+                verified_value = verified_value.strip()
+                if not verified_value:
+                    continue  # Skip empty strings
+            
+            original_value = original.get(key)
+            if isinstance(original_value, str):
+                original_value = original_value.strip() if original_value else None
+            
+            # Always update identifiers if they're missing
+            if key in safe_identifier_fields:
+                if not original_value or (is_verified and verified_value):
+                    safe_updates[key] = verified_value
+                continue
+            
+            # For high confidence fields, be more conservative
+            if key in high_confidence_fields:
+                if not original_value:
+                    # Field is missing, safe to add
+                    safe_updates[key] = verified_value
+                elif is_verified and high_confidence:
+                    # Verified with high confidence, safe to update
+                    safe_updates[key] = verified_value
+                elif is_partial and medium_confidence and not original_value:
+                    # Partial but medium confidence, only if missing
+                    safe_updates[key] = verified_value
+                # Otherwise, preserve original value
+                continue
+            
+            # For metadata fields
+            if key in metadata_fields:
+                if not original_value:
+                    # Always fill missing metadata fields
+                    safe_updates[key] = verified_value
+                elif is_verified and high_confidence:
+                    # Verified with high confidence, safe to update
+                    safe_updates[key] = verified_value
+                # For partial/low confidence, preserve existing metadata
+                continue
+            
+            # For other fields (citation data, etc.), only update if missing
+            if not original_value:
+                safe_updates[key] = verified_value
+        
+        return safe_updates
+    
     def _update_within_session(self, session, paper_id: int, updates: Dict[str, Any]) -> None:
         """Update paper/metadata/citation using an existing session (no commit)."""
         paper_fields = ['title', 'authors', 'year', 'abstract', 'doi', 'journal', 'publisher', 'file_path', 'full_text', 
@@ -688,6 +813,191 @@ class UnifiedPaperRepository:
                             :h_index, :citation_source, :citation_updated_at)
                 """), {'paper_id': paper_id, **citation_updates})
 
+    def restore_metadata_from_pdf(self, paper_id: int) -> bool:
+        """Restore paper metadata by re-extracting from the original PDF file.
+        
+        This is useful when metadata was incorrectly overwritten during verification.
+        It re-extracts metadata from the PDF file and restores the original extracted values.
+        
+        Args:
+            paper_id: ID of the paper to restore
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        from .utils.enhanced_pdf_extractor import extract_paper_metadata
+        from .utils.metadata_enricher import enrich_paper_metadata
+        
+        paper = self.get_paper_by_id(paper_id)
+        if not paper:
+            logger.error(f"Paper {paper_id} not found")
+            return False
+        
+        file_path = paper.get('file_path')
+        if not file_path or not Path(file_path).exists():
+            logger.error(f"PDF file not found for paper {paper_id}: {file_path}")
+            return False
+        
+        try:
+            # Re-extract metadata from PDF
+            extracted = extract_paper_metadata(file_path)
+            
+            if not extracted or extracted.confidence < 0.1:
+                logger.error(f"Failed to extract meaningful metadata from PDF for paper {paper_id}")
+                return False
+            
+            # Enrich metadata
+            enriched = enrich_paper_metadata(
+                extracted.title, extracted.authors, extracted.abstract,
+                extracted.doi, extracted.journal, extracted.year
+            )
+            
+            # Prepare metadata updates (only from PDF extraction, not verification)
+            updates = {
+                'title': extracted.title,
+                'authors': extracted.authors,
+                'year': extracted.year,
+                'abstract': extracted.abstract,
+                'doi': extracted.doi,
+                'journal': extracted.journal or enriched.journal_name,
+                'publisher': extracted.publisher or enriched.publisher,
+                'full_text': extracted.full_text,
+                'department': enriched.department,
+                'research_domain': enriched.research_domain,
+                'indexing_status': enriched.indexing_status,
+            }
+            
+            # Remove None values
+            updates = {k: v for k, v in updates.items() if v is not None}
+            
+            # Update the paper metadata
+            if self.update_paper_metadata(paper_id, updates):
+                # Also clear verification status since we're restoring original data
+                self.clear_verification_status(paper_id)
+                return True
+            else:
+                logger.error(f"Failed to update metadata for paper {paper_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error restoring metadata from PDF for paper {paper_id}: {e}")
+            return False
+    
+    def clear_verification_status(self, paper_id: int) -> bool:
+        """Clear verification status for a paper, allowing it to be re-verified.
+        
+        This is useful when a paper was incorrectly verified and needs to be
+        re-verified with the improved verification logic.
+        
+        Args:
+            paper_id: ID of the paper to clear verification for
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        for attempt in range(3):
+            session = self.db_manager.get_session()
+            try:
+                updates = {
+                    'verification_status': 'pending',
+                    'verification_method': None,
+                    'verification_confidence': None,
+                    'verification_date': None,
+                    'last_verification_attempt': datetime.utcnow(),
+                    'paper_id': paper_id
+                }
+                
+                if DB_BACKEND == "postgres":
+                    updates['updated_at'] = 'NOW()'
+                    session.execute(text("""
+                        UPDATE papers_unified 
+                        SET verification_status = 'pending',
+                            verification_method = NULL,
+                            verification_confidence = NULL,
+                            verification_date = NULL,
+                            last_verification_attempt = :last_verification_attempt,
+                            updated_at = NOW()
+                        WHERE id = :paper_id
+                    """), updates)
+                else:
+                    updates['updated_at'] = datetime.utcnow()
+                    session.execute(text("""
+                        UPDATE papers_unified 
+                        SET verification_status = 'pending',
+                            verification_method = NULL,
+                            verification_confidence = NULL,
+                            verification_date = NULL,
+                            last_verification_attempt = :last_verification_attempt,
+                            updated_at = :updated_at
+                        WHERE id = :paper_id
+                    """), updates)
+                
+                session.commit()
+                return True
+            except OperationalError as e:
+                session.rollback()
+                logger.warning(f"Transient DB error clearing verification (attempt {attempt+1}/3): {e}")
+                if attempt == 2:
+                    logger.error("Giving up after retries for clearing verification")
+                    return False
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error clearing verification status: {e}")
+                return False
+            finally:
+                session.close()
+        return False
+    
+    def get_recently_verified_papers(self, status: str = 'partial', days: int = 7) -> List[Dict[str, Any]]:
+        """Get papers that were recently verified with a specific status.
+        
+        Useful for identifying papers that might need review after verification process improvements.
+        
+        Args:
+            status: Verification status to filter by ('partial', 'verified', etc.)
+            days: Number of days to look back
+            
+        Returns:
+            List of paper dictionaries
+        """
+        session = self.db_manager.get_session()
+        try:
+            cutoff_date = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            from datetime import timedelta
+            cutoff_date = cutoff_date - timedelta(days=days)
+            
+            if DB_BACKEND == "postgres":
+                result = session.execute(text("""
+                    SELECT p.id, p.title, p.authors, p.year, p.doi, p.journal,
+                           p.verification_status, p.verification_method, p.verification_confidence,
+                           p.verification_date, p.last_verification_attempt
+                    FROM papers_unified p
+                    WHERE p.verification_status = :status
+                      AND p.verification_date >= :cutoff_date
+                    ORDER BY p.verification_date DESC
+                """), {'status': status, 'cutoff_date': cutoff_date})
+            else:
+                result = session.execute(text("""
+                    SELECT p.id, p.title, p.authors, p.year, p.doi, p.journal,
+                           p.verification_status, p.verification_method, p.verification_confidence,
+                           p.verification_date, p.last_verification_attempt
+                    FROM papers_unified p
+                    WHERE p.verification_status = :status
+                      AND p.verification_date >= :cutoff_date
+                    ORDER BY p.verification_date DESC
+                """), {'status': status, 'cutoff_date': cutoff_date})
+            
+            papers = []
+            for row in result:
+                papers.append(dict(row._mapping))
+            
+            return papers
+        except Exception as e:
+            logger.error(f"Error getting recently verified papers: {e}")
+            return []
+        finally:
+            session.close()
+    
     def update_paper_metadata(self, paper_id: int, updates: Dict[str, Any]) -> bool:
         """Update paper metadata in normalized structure with retry on transient DB errors."""
         for attempt in range(3):
@@ -728,7 +1038,6 @@ class UnifiedPaperRepository:
                 # Check if any rows were affected
                 if result.rowcount > 0:
                     session.commit()
-                    logger.info(f"Successfully deleted paper {paper_id}")
                     return True
                 else:
                     logger.warning(f"Paper {paper_id} not found for deletion")

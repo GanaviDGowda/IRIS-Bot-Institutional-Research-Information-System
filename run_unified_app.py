@@ -26,9 +26,9 @@ from app.gui_qt.enhanced_main_window import launch_enhanced_app
 from app.database_unified import get_unified_database_manager, get_unified_paper_repository
 from app.config import APP_NAME, DB_BACKEND
 
-# Configure logging
+# Configure logging - only show warnings and errors
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('research_paper_browser_unified.log', encoding='utf-8'),

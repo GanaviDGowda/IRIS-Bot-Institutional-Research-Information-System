@@ -27,11 +27,8 @@ try:
 except ImportError:
     HAS_ISSN_VALIDATOR = False
 
-try:
-    from .google_scholar_validator import google_scholar_validator
-    HAS_SCHOLAR_VALIDATOR = True
-except ImportError:
-    HAS_SCHOLAR_VALIDATOR = False
+# Google Scholar validator removed
+HAS_SCHOLAR_VALIDATOR = False
 
 try:
     from .journal_patterns import journal_pattern_matcher
@@ -211,10 +208,6 @@ class EnhancedPDFExtractor:
             elif metadata.issn and HAS_ISSN_VALIDATOR and metadata.confidence < 0.8:
                 logger.info(f"No DOI found. Validating journal via ISSN: {metadata.issn}...")
                 self._validate_with_issn(metadata)
-            # If still low confidence and have title, try Google Scholar
-            elif metadata.title and HAS_SCHOLAR_VALIDATOR and metadata.confidence < 0.7:
-                logger.info(f"Low confidence. Validating via Google Scholar...")
-                self._validate_with_scholar(metadata)
             
             # Extract full text
             metadata.full_text = self._extract_full_text(doc)
@@ -1010,46 +1003,6 @@ class EnhancedPDFExtractor:
                 
         except Exception as e:
             logger.error(f"Error validating with ISSN: {e}")
-    
-    def _validate_with_scholar(self, metadata: ExtractedMetadata) -> None:
-        """Validate and enrich metadata using Google Scholar."""
-        try:
-            from .google_scholar_validator import google_scholar_validator
-            
-            logger.info(f"Validating paper with Google Scholar: {metadata.title[:50]}...")
-            scholar_data = google_scholar_validator.search_paper(
-                metadata.title,
-                metadata.authors,
-                metadata.year
-            )
-            
-            if scholar_data.success:
-                logger.info(f"Successfully validated via Google Scholar")
-                
-                # Update with Scholar data (only if not already present or better)
-                if scholar_data.authors and len(scholar_data.authors) > len(metadata.authors):
-                    metadata.authors = scholar_data.authors
-                    logger.info(f"Updated authors from Google Scholar")
-                
-                if scholar_data.year and not metadata.year:
-                    metadata.year = scholar_data.year
-                    logger.info(f"Updated year from Google Scholar: {metadata.year}")
-                
-                if scholar_data.journal and not metadata.journal:
-                    metadata.journal = scholar_data.journal
-                    logger.info(f"Updated journal from Google Scholar: {metadata.journal}")
-                
-                if scholar_data.publisher and not metadata.publisher:
-                    metadata.publisher = scholar_data.publisher
-                
-                # Boost confidence since we validated via Google Scholar
-                metadata.confidence = max(metadata.confidence, 0.70)
-                logger.info(f"Boosted confidence to {metadata.confidence} via Google Scholar")
-            else:
-                logger.warning(f"Google Scholar validation failed: {scholar_data.error}")
-                
-        except Exception as e:
-            logger.error(f"Error validating with Google Scholar: {e}")
     
     def _detect_paper_type(self, text: str, metadata: ExtractedMetadata) -> str:
         """Detect paper type from PDF content."""

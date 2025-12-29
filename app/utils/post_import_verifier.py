@@ -10,7 +10,6 @@ from enum import Enum
 
 from .crossref_fetcher import CrossrefAPIFetcher, CrossrefMetadata
 from .issn_validator import ISSNValidator, ISSNMetadata
-from .google_scholar_validator import GoogleScholarValidator, ScholarMetadata
 from .unified_classifier import UnifiedPaperClassifier
 from .citation_fetcher import CitationFetcher
 
@@ -30,7 +29,7 @@ class VerificationResult:
     """Result of post-import verification."""
     paper_id: int
     status: VerificationStatus
-    method_used: str  # "doi", "issn", "author_title", "google_scholar"
+    method_used: str  # "doi", "issn", "author_title"
     confidence_score: float  # 0.0 to 1.0
     verified_metadata: Dict[str, Any]
     errors: List[str]
@@ -50,7 +49,6 @@ class PostImportVerifier:
         """Initialize the verifier with all validation tools."""
         self.crossref_fetcher = CrossrefAPIFetcher()
         self.issn_validator = ISSNValidator()
-        self.scholar_validator = GoogleScholarValidator()
         self.citation_fetcher = CitationFetcher()
         self.classifier = UnifiedPaperClassifier()
         
@@ -79,16 +77,14 @@ class PostImportVerifier:
             suggestions=[]
         )
         
-        logger.info(f"Starting verification for paper {paper_id}: {paper.get('title', 'Unknown')}")
-        
-        # Try verification methods in order of preference
+        # Verification methods (in order of preference)
         verification_methods = [
             self._verify_by_doi,
             self._verify_by_issn,
-            self._verify_by_author_title,
-            self._verify_by_google_scholar
+            self._verify_by_author_title
         ]
         
+        # Try verification methods
         for method in verification_methods:
             try:
                 method_result = method(paper)
@@ -108,15 +104,41 @@ class PostImportVerifier:
             result.verified_metadata['indexing_status'] = self._determine_indexing_status(result.verified_metadata)
         
         # Determine final status
+        # If we have verified metadata, even with lower confidence, consider it PARTIAL
         if result.confidence_score >= self.high_confidence:
             result.status = VerificationStatus.VERIFIED
         elif result.confidence_score >= self.min_confidence:
             result.status = VerificationStatus.PARTIAL
+        elif result.verified_metadata:
+            # Check if we have meaningful metadata (not just empty strings)
+            has_meaningful_metadata = any(
+                v for k, v in result.verified_metadata.items() 
+                if k != 'indexing_status' and v and (isinstance(v, str) and v.strip() or not isinstance(v, str))
+            )
+            if has_meaningful_metadata:
+                # If we found some metadata (DOI, journal, etc.), mark as PARTIAL even with low confidence
+                result.status = VerificationStatus.PARTIAL
+                # Boost confidence slightly to reflect that we found something
+                if result.confidence_score > 0:
+                    result.confidence_score = max(result.confidence_score, 0.5)
+                else:
+                    # Even with 0 confidence, if we have metadata, give it minimum partial confidence
+                    result.confidence_score = 0.5
+            else:
+                result.status = VerificationStatus.FAILED
         else:
             result.status = VerificationStatus.FAILED
         
-        logger.info(f"Verification complete for paper {paper_id}: {result.status.value} (confidence: {result.confidence_score:.2f})")
         return result
+    
+    def _is_issn_format(self, value: str) -> bool:
+        """Check if a value looks like an ISSN format (e.g., 1234-567X)."""
+        import re
+        if not value:
+            return False
+        # ISSN format: 4 digits, hyphen, 4 characters (last can be X)
+        pattern = r'^\d{4}-\d{3}[\dXx]$'
+        return bool(re.match(pattern, value.strip()))
     
     def _verify_by_doi(self, paper: Dict[str, Any]) -> Optional[VerificationResult]:
         """Verify paper using DOI."""
@@ -124,12 +146,23 @@ class PostImportVerifier:
         if not doi:
             return None
         
-        logger.info(f"Verifying by DOI: {doi}")
-        
         try:
             crossref_metadata = self.crossref_fetcher.fetch_by_doi(doi)
             
             if not crossref_metadata.success:
+                # Check if invalid DOI might actually be an ISSN
+                if crossref_metadata.error and "Invalid DOI format" in crossref_metadata.error:
+                    if self._is_issn_format(doi):
+                        # Store it in paper metadata so ISSN verification can use it
+                        if 'metadata' not in paper:
+                            paper['metadata'] = {}
+                        if isinstance(paper.get('metadata'), dict):
+                            paper['metadata']['issn'] = doi
+                        elif isinstance(paper, dict):
+                            paper['issn'] = doi
+                        # Return None so verification can continue with ISSN method
+                        return None
+                
                 return VerificationResult(
                     paper_id=0,
                     status=VerificationStatus.FAILED,
@@ -190,8 +223,6 @@ class PostImportVerifier:
         issn = self._extract_issn_from_paper(paper)
         if not issn:
             return None
-        
-        logger.info(f"Verifying by ISSN: {issn}")
         
         try:
             issn_metadata = self.issn_validator.validate_by_issn(issn)
@@ -255,8 +286,6 @@ class PostImportVerifier:
         if not title or len(title) < 10:
             return None
         
-        logger.info(f"Verifying by author+title: {title[:50]}...")
-        
         try:
             # Search Crossref by title and author
             results = self.crossref_fetcher.search_by_title_and_author(title, authors, limit=3)
@@ -276,8 +305,27 @@ class PostImportVerifier:
             best_match = results[0]
             match_score = getattr(best_match, 'match_score', 0.0)
             
+            # Boost confidence if we found metadata successfully
+            # If we found a match in Crossref, it's meaningful even if title similarity is lower
+            if match_score < 0.3 and best_match.doi:  # Found a DOI means it's a real paper
+                match_score = max(match_score, 0.4)  # Boost minimum confidence
+            
+            # Calculate additional confidence boost from metadata completeness
+            metadata_completeness = 0.0
+            if best_match.doi:
+                metadata_completeness += 0.15
+            if best_match.journal:
+                metadata_completeness += 0.1
+            if best_match.year:
+                metadata_completeness += 0.1
+            if best_match.authors:
+                metadata_completeness += 0.1
+            
+            # Combine match score with metadata completeness
+            final_confidence = min(0.95, match_score + (metadata_completeness * 0.5))
+            
             # Only use verified title if confidence is high enough
-            title_to_use = best_match.title if match_score >= 0.8 else title
+            title_to_use = best_match.title if final_confidence >= 0.5 else title
             
             verified_metadata = {
                 'doi': best_match.doi,
@@ -294,9 +342,9 @@ class PostImportVerifier:
             
             return VerificationResult(
                 paper_id=0,
-                status=VerificationStatus.VERIFIED if match_score >= self.high_confidence else VerificationStatus.PARTIAL,
+                status=VerificationStatus.VERIFIED if final_confidence >= self.high_confidence else VerificationStatus.PARTIAL,
                 method_used="author_title",
-                confidence_score=match_score,
+                confidence_score=final_confidence,
                 verified_metadata=verified_metadata,
                 errors=[],
                 suggestions=self._generate_suggestions(paper, verified_metadata)
@@ -314,74 +362,6 @@ class PostImportVerifier:
                 suggestions=[]
             )
     
-    def _verify_by_google_scholar(self, paper: Dict[str, Any]) -> Optional[VerificationResult]:
-        """Verify paper using Google Scholar."""
-        title = paper.get('title', '').strip()
-        authors = paper.get('authors', '').strip()
-        year = paper.get('year', 0)
-        
-        if not title or len(title) < 10:
-            return None
-        
-        logger.info(f"Verifying by Google Scholar: {title[:50]}...")
-        
-        try:
-            scholar_metadata = self.scholar_validator.search_paper(title, authors, year)
-            
-            if not scholar_metadata.success:
-                return VerificationResult(
-                    paper_id=0,
-                    status=VerificationStatus.FAILED,
-                    method_used="google_scholar",
-                    confidence_score=0.0,
-                    verified_metadata={},
-                    errors=[scholar_metadata.error],
-                    suggestions=[]
-                )
-            
-            # Calculate confidence based on title match
-            confidence = self._calculate_title_confidence(
-                title,
-                scholar_metadata.title
-            )
-            
-            # Only use verified title if confidence is high enough
-            title_to_use = scholar_metadata.title if confidence >= 0.8 else title
-            
-            verified_metadata = {
-                'title': title_to_use,
-                'authors': scholar_metadata.authors,
-                'journal': scholar_metadata.journal,
-                'publisher': scholar_metadata.publisher,
-                'year': scholar_metadata.year,
-                'abstract': scholar_metadata.abstract,
-                'citations': scholar_metadata.citations,
-                'pdf_link': scholar_metadata.pdf_link,
-                'scholar_link': scholar_metadata.scholar_link
-            }
-            
-            return VerificationResult(
-                paper_id=0,
-                status=VerificationStatus.VERIFIED if confidence >= self.high_confidence else VerificationStatus.PARTIAL,
-                method_used="google_scholar",
-                confidence_score=confidence,
-                verified_metadata=verified_metadata,
-                errors=[],
-                suggestions=self._generate_suggestions(paper, verified_metadata)
-            )
-            
-        except Exception as e:
-            logger.error(f"Google Scholar verification error: {e}")
-            return VerificationResult(
-                paper_id=0,
-                status=VerificationStatus.FAILED,
-                method_used="google_scholar",
-                confidence_score=0.0,
-                verified_metadata={},
-                errors=[f"Google Scholar verification failed: {str(e)}"],
-                suggestions=[]
-            )
-    
     def _extract_issn_from_paper(self, paper: Dict[str, Any]) -> Optional[str]:
         """Extract ISSN from paper metadata."""
         # Check if ISSN is already in metadata
@@ -390,6 +370,15 @@ class PostImportVerifier:
             issn = metadata.get('issn', '')
             if issn:
                 return issn
+        
+        # Check if DOI field contains an ISSN (common mistake)
+        doi = paper.get('doi', '').strip()
+        if doi and self._is_issn_format(doi):
+            return doi
+        
+        # Check direct issn field
+        if paper.get('issn'):
+            return paper.get('issn')
         
         # Check journal field
         journal = paper.get('journal', '')
@@ -502,19 +491,9 @@ class PostImportVerifier:
         """
         results = []
         
-        logger.info(f"Starting batch verification of {len(papers)} papers")
-        
         for i, paper in enumerate(papers):
-            logger.info(f"Verifying paper {i+1}/{len(papers)}")
             result = self.verify_paper(paper)
             results.append(result)
-        
-        # Summary statistics
-        verified_count = sum(1 for r in results if r.status == VerificationStatus.VERIFIED)
-        partial_count = sum(1 for r in results if r.status == VerificationStatus.PARTIAL)
-        failed_count = sum(1 for r in results if r.status == VerificationStatus.FAILED)
-        
-        logger.info(f"Batch verification complete: {verified_count} verified, {partial_count} partial, {failed_count} failed")
         
         return results
 

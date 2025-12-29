@@ -1,0 +1,7 @@
+Function,Iterations,Avg Time (ms),Min Time (ms),Max Time (ms),Std Dev (ms)
+database_add_paper,50,2.549,0.607,46.770,6.419
+database_list_all,50,4.557,3.000,8.149,0.975
+database_search_papers,50,3.381,1.961,7.010,0.928
+hybrid_search,30,125.764,50.017,1739.573,305.141
+paper_verification,20,2011.149,1710.432,2355.922,154.259
+semantic_search,30,108.023,40.993,1525.964,267.927
